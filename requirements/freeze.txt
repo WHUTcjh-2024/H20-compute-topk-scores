@@ -1,9 +1,9 @@
 # Audit-only snapshot of /root/autodl-tmp/venv-vllm029b on 2026-10-24.
 # Not intended for direct install: machine-local wheel paths are preserved.
 # Install from requirements/core.txt instead.
-# This snapshot was captured from an earlier shared environment and retains
-# two packages from that environment (flag_gems, flaggems_vllm). Neither is a
-# dependency of this repository and no code here imports them.
+# Two packages from an earlier shared environment were removed from this
+# snapshot because they are not dependencies of this repository.
+
 
 agent-detector==2.0.0
 aiohappyeyeballs==2.7.1
@@ -51,8 +51,6 @@ fastar==0.12.0
 fastrlock==0.8.4
 fastsafetensors==0.5.0
 filelock==4.2.4
-flag_gems @ file:///tmp/flag_gems-5.4.0-py3-none-any.whl
--e git+https://github.com/WHUTcjh-2024/FlagGems-vllm.git@45c17e1bf54125173adb9e2fb1f38cb39d9e2edc#egg=flaggems_vllm
 flashinfer-python==0.6.18
 frozenlist==1.8.0
 fsspec==2026.9.0
