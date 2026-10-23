@@ -12,60 +12,78 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Performance benchmark for the optimized ``compute_topk_scores`` candidate.
+"""Performance benchmark for the candidate ``compute_topk_scores``.
 
-Baseline: vLLM's own ``compute_topk_scores``.
-Candidate: the fused-scan implementation that deliberately keeps ``torch.topk``.
-No native/radix top-k implementation is part of this repository scope.
+Reference: vLLM 0.29.0 ``vllm.v1.worker.gpu.sample.logprob.compute_topk_scores``.
+Candidate: this repository (``h20_topk``).
 """
+
+import sys
+from pathlib import Path
 
 import pytest
 import torch
 
-import flaggems_vllm
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
-from . import base, consts
+from h20_topk import compute_topk_scores as candidate_fn
 
-vendor_name = flaggems_vllm.vendor_name
+SHAPES = [
+    (1, 32768, 0),
+    (1, 32768, 10),
+    (1, 131072, 10),
+    (8, 131072, 50),
+    (64, 65536, 10),
+    (64, 131072, 10),
+    (256, 32768, 0),
+    (256, 151936, 20),
+]
+
+DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 
 
-class ComputeTopkScoresBenchmark(base.Benchmark):
-    def __init__(self, op_name, torch_op, dtypes):
-        super().__init__(op_name, torch_op, dtypes)
-        self.gems_op = None
-        self.shape_desc = "B, V, K"
-
-    def set_shapes(self, shape_file_path=None):
-        self.shapes = [
-            (1, 32768, 0),
-            (1, 32768, 10),
-            (1, 131072, 10),
-            (8, 131072, 50),
-            (64, 65536, 10),
-            (64, 131072, 10),
-            (256, 32768, 0),
-            (256, 151936, 20),
-        ]
-
-    def get_input_iter(self, dtype):
-        for batch, vocab, topk in self.shapes:
-            logits = torch.randn(batch, vocab, dtype=dtype, device=self.device)
-            sampled = torch.randint(vocab, (batch,), device=self.device)
-            yield logits, topk, sampled
-
-    def set_gems(self, gems_op):
-        self.gems_op = gems_op
+def _median_ms(fn, args, warmup=10, repeats=50):
+    for _ in range(warmup):
+        fn(*args)
+    torch.cuda.synchronize()
+    samples = []
+    for _ in range(repeats):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        fn(*args)
+        end.record()
+        end.synchronize()
+        samples.append(start.elapsed_time(end))
+    samples.sort()
+    return samples[len(samples) // 2]
 
 
 @pytest.mark.compute_topk_scores
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_compute_topk_scores():
-    vllm_logprob = pytest.importorskip("vllm.v1.worker.gpu.sample.logprob")
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_compute_topk_scores(dtype):
+    logprob = pytest.importorskip("vllm.v1.worker.gpu.sample.logprob")
+    reference_fn = logprob.compute_topk_scores
 
-    bench = ComputeTopkScoresBenchmark(
-        op_name="compute_topk_scores",
-        torch_op=vllm_logprob.compute_topk_scores,
-        dtypes=consts.FLOAT_DTYPES,
-    )
-    bench.set_gems(flaggems_vllm.compute_topk_scores)
-    bench.run()
+    for batch, vocab, topk in SHAPES:
+        torch.manual_seed(314159 + batch + vocab + topk)
+        logits = torch.randn(batch, vocab, dtype=dtype, device="cuda")
+        sampled = torch.randint(vocab, (batch,), device="cuda")
+        args = (logits, topk, sampled)
+
+        ref = reference_fn(*args)
+        cand = candidate_fn(*args)
+        assert cand.logprob_token_ids.shape == ref.logprob_token_ids.shape
+        assert cand.logprobs.shape == ref.logprobs.shape
+        assert cand.selected_token_ranks.shape == ref.selected_token_ranks.shape
+
+        ref_ms = _median_ms(reference_fn, args)
+        cand_ms = _median_ms(candidate_fn, args)
+        print(
+            f"[bench] {dtype} B={batch} V={vocab} K={topk} "
+            f"reference={ref_ms:.4f}ms candidate={cand_ms:.4f}ms "
+            f"ratio={ref_ms / cand_ms:.3f}x"
+        )

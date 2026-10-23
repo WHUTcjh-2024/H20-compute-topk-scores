@@ -1,0 +1,9 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+artifacts
+requirements/freeze.txt

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Accuracy tests for ``flaggems_vllm.compute_topk_scores``.
+"""Accuracy tests for ``h20_topk.compute_topk_scores``.
 
 The reference is vLLM's own ``compute_topk_scores``.  Ties are expected with
 low-precision logits, so token ids are compared as a value multiset; ranks and
@@ -22,11 +22,11 @@ the sampled-token column are compared exactly.
 import pytest
 import torch
 
-import flaggems_vllm
+from h20_topk import compute_topk_scores
 
 from . import conftest as cfg
 
-device = flaggems_vllm.device
+device = torch.device("cuda")
 
 try:
     from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores as _vllm_fn
@@ -120,7 +120,7 @@ def test_compute_topk_scores_matches_vllm(shape, num_logprobs, dtype):
     batch, vocab = shape
     logits, sampled = _make_inputs(batch, vocab, dtype, seed=batch + vocab)
     ref = _vllm_fn(logits, num_logprobs, sampled)
-    out = flaggems_vllm.compute_topk_scores(logits, num_logprobs, sampled)
+    out = compute_topk_scores(logits, num_logprobs, sampled)
     _assert_matches(
         ref, out, logits, sampled, num_logprobs, strict_ids=(dtype == torch.float32)
     )
@@ -133,7 +133,7 @@ def test_compute_topk_scores_logits_mode(dtype, num_logprobs):
     batch, vocab = 8, 65536
     logits, sampled = _make_inputs(batch, vocab, dtype, seed=7)
     ref = _vllm_fn(logits, num_logprobs, sampled, logits_mode=True)
-    out = flaggems_vllm.compute_topk_scores(
+    out = compute_topk_scores(
         logits, num_logprobs, sampled, logits_mode=True
     )
     assert torch.equal(out.selected_token_ranks, ref.selected_token_ranks)
@@ -155,7 +155,7 @@ def test_compute_topk_scores_non_contiguous_rows(num_logprobs):
     logits = base[:, :vocab]
     assert logits.stride(0) == vocab + pad
     ref = _vllm_fn(logits, num_logprobs, sampled)
-    out = flaggems_vllm.compute_topk_scores(logits, num_logprobs, sampled)
+    out = compute_topk_scores(logits, num_logprobs, sampled)
     _assert_matches(ref, out, logits, sampled, num_logprobs, strict_ids=True)
 
 
@@ -172,7 +172,7 @@ def test_compute_topk_scores_ties(num_logprobs):
         vocab, (batch,), dtype=torch.int64, device=device, generator=generator
     )
     ref = _vllm_fn(logits, num_logprobs, sampled)
-    out = flaggems_vllm.compute_topk_scores(logits, num_logprobs, sampled)
+    out = compute_topk_scores(logits, num_logprobs, sampled)
     _assert_matches(ref, out, logits, sampled, num_logprobs, strict_ids=False)
     assert torch.equal(out.selected_token_ranks, ref.selected_token_ranks)
 
@@ -200,7 +200,7 @@ def test_compute_topk_scores_custom_token_ids(num_logprobs, max_custom):
         max_per_req_token_ids=max_custom,
     )
     ref = _vllm_fn(logits, num_logprobs, sampled, **kwargs)
-    out = flaggems_vllm.compute_topk_scores(logits, num_logprobs, sampled, **kwargs)
+    out = compute_topk_scores(logits, num_logprobs, sampled, **kwargs)
     assert torch.equal(out.logprob_token_ids, ref.logprob_token_ids)
     assert torch.equal(out.selected_token_ranks, ref.selected_token_ranks)
     torch.testing.assert_close(out.logprobs, ref.logprobs, atol=2e-3, rtol=1e-5)
@@ -210,9 +210,9 @@ def test_compute_topk_scores_custom_token_ids(num_logprobs, max_custom):
 def test_compute_topk_scores_rejects_bad_inputs():
     logits, sampled = _make_inputs(2, 1024, torch.float32)
     with pytest.raises(NotImplementedError):
-        flaggems_vllm.compute_topk_scores(logits, 5, sampled.to(torch.int16))
+        compute_topk_scores(logits, 5, sampled.to(torch.int16))
     with pytest.raises(NotImplementedError):
-        flaggems_vllm.compute_topk_scores(
+        compute_topk_scores(
             torch.empty((2, 0), device=device), 0, sampled
         )
 
@@ -221,7 +221,7 @@ def test_compute_topk_scores_rejects_bad_inputs():
 def test_compute_topk_scores_empty_batch():
     logits = torch.empty((0, 1024), dtype=torch.float32, device=device)
     sampled = torch.empty((0,), dtype=torch.int64, device=device)
-    out = flaggems_vllm.compute_topk_scores(logits, 5, sampled)
+    out = compute_topk_scores(logits, 5, sampled)
     assert out.logprob_token_ids.shape == (0, 6)
     assert out.logprobs.shape == (0, 6)
     assert out.selected_token_ranks.shape == (0,)
@@ -231,11 +231,11 @@ def test_compute_topk_scores_empty_batch():
 def test_compute_topk_scores_cu_num_logits_passthrough():
     logits, sampled = _make_inputs(4, 4096, torch.float32)
     cu_list = [0, 1, 2, 3, 4]
-    out = flaggems_vllm.compute_topk_scores(logits, 5, sampled, cu_num_logits=cu_list)
+    out = compute_topk_scores(logits, 5, sampled, cu_num_logits=cu_list)
     assert out.cu_num_generated_tokens == cu_list
     assert out.cu_num_generated_tokens_tensor is None
 
     cu_tensor = torch.tensor(cu_list, dtype=torch.int32, device=device)
-    out = flaggems_vllm.compute_topk_scores(logits, 5, sampled, cu_num_logits=cu_tensor)
+    out = compute_topk_scores(logits, 5, sampled, cu_num_logits=cu_tensor)
     assert out.cu_num_generated_tokens is None
     assert out.cu_num_generated_tokens_tensor is cu_tensor

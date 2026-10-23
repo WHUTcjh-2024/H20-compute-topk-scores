@@ -1,4 +1,33 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
 .venv/
+venv/
+virtualenv/
+
+# Build output
+build/
+dist/
+
+# Local benchmark output and logs
 artifacts/
+*.log
+benchmark_results/
+
+# Triton / CUDA caches
+.triton/
+triton_cache/
+*.cubin
+*.ptx
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

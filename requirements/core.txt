@@ -1,0 +1,10 @@
+# Pinned core runtime for the verified H20 environment (2026-10-24).
+# Host NVIDIA driver and the system CUDA toolkit are NOT pip dependencies.
+# Verified combination: Python 3.12.13, torch 2.13.0+cu130, CUDA 13.0,
+# driver 595.71.05.  vLLM 0.29.0 pins torch==2.13.0 itself.
+torch==2.13.0
+triton==3.7.1
+vllm==0.29.0
+transformers==5.20.2
+numpy==2.3.5
+pytest==9.1.1

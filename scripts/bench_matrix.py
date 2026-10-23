@@ -7,6 +7,7 @@ is the primary metric.
 
 import argparse
 import hashlib
+import importlib.util
 import itertools
 import json
 import statistics
@@ -37,13 +38,23 @@ def git_head():
         return None
 
 
-def load_fn(target):
+def load_fn(target, op_path=None):
     if target == "vllm":
         from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
         return compute_topk_scores
 
-    import flaggems_vllm
-    return flaggems_vllm.compute_topk_scores
+    if op_path is not None:
+        spec = importlib.util.spec_from_file_location("candidate_op", op_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.compute_topk_scores
+
+    src = Path(__file__).resolve().parents[1] / "src"
+    if str(src) not in sys.path:
+        sys.path.insert(0, str(src))
+    from h20_topk import compute_topk_scores
+
+    return compute_topk_scores
 
 
 def summarize(values):
@@ -78,12 +89,13 @@ def measure(fn, warmup, repeats):
     return result, summarize(device_ms), summarize(wall_ms)
 
 
-def environment(target):
+def environment(target, op_path=None):
     import triton
     import vllm
 
     record = {
         "target": target,
+        "candidate_op": str(op_path) if op_path is not None else None,
         "git_head": git_head(),
         "gpu": torch.cuda.get_device_name(0),
         "gpu_capability": ".".join(map(str, torch.cuda.get_device_capability())),
@@ -108,6 +120,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", choices=("vllm", "candidate"), required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--op",
+        type=Path,
+        default=None,
+        help="load the candidate from this file instead of the h20_topk package",
+    )
     parser.add_argument("--batches", type=parse_ints, default=parse_ints("1,2,4,8,16,32,64,128,256"))
     parser.add_argument("--vocabs", type=parse_ints, default=parse_ints("32768,65536,131072,151936"))
     parser.add_argument("--ks", type=parse_ints, default=parse_ints("0,1,5,10,20,50"))
@@ -117,10 +135,13 @@ def main():
     parser.add_argument("--max-cases", type=int, default=0)
     args = parser.parse_args()
 
+    if args.op is not None and args.target != "candidate":
+        parser.error("--op requires --target candidate")
+
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA device unavailable")
 
-    fn = load_fn(args.target)
+    fn = load_fn(args.target, args.op)
     dtype_names = args.dtypes.split(",")
     cases = list(itertools.product(dtype_names, args.batches, args.vocabs, args.ks))
     if args.max_cases:
@@ -128,7 +149,7 @@ def main():
 
     source = Path(__file__).read_bytes()
     report = {
-        "environment": environment(args.target),
+        "environment": environment(args.target, args.op),
         "harness_sha256": hashlib.sha256(source).hexdigest(),
         "warmup": args.warmup,
         "repeats": args.repeats,
