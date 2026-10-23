@@ -1,145 +1,172 @@
 # compute_topk_scores — NVIDIA H20 算子优化工程
 
-本仓库独立研究和优化 vLLM 0.29.0 `compute_topk_scores` 路径中的三个 Triton kernel：
+Reference: upstream `vllm==0.29.0`
+`vllm/v1/worker/gpu/sample/logprob.py`。
 
-- `_topk_log_softmax_kernel`
-- `_ranks_kernel`
-- `_fill_logprob_token_ids_kernel`
+Candidate: this repository (`src/h20_topk`).
 
-## 术语与范围
+Target GPU: NVIDIA H20.
 
-- **reference**：upstream `vllm==0.29.0` 的 `vllm/v1/worker/gpu/sample/logprob.py`。
-- **candidate**：本仓库 `src/h20_topk` 中的实现。
+## 结果
+
+- Correctness：quick 57/57，full 129/129。
+- Benchmark：72 个 case，串行测量，CUDA events，warmup=20，repeats=200，取 median。
+- `ratio = reference latency / candidate latency`：
+
+| 指标 | 值 |
+| --- | ---: |
+| ratio min | 0.991 |
+| ratio p10 | 1.002 |
+| ratio median | 1.359 |
+| ratio mean | 1.388 |
+| ratio p90 | 1.805 |
+| ratio max | 1.907 |
+| ratio < 0.8 | 0 |
+| 0.8 <= ratio < 1.0 | 5 |
+| ratio >= 1.0 | 67 |
+
+5 个低于 1.0 的 case 都是 `V=32768`，ratio 在 `0.991–0.996`，属于 launch config 与测量噪声范围。完整 72 行表格见
+[`benchmark/results-h20.md`](benchmark/results-h20.md)。
+
+按 B/V 聚合的中位 ratio：
+
+| B | V=32768 | V=131072 | V=151936 |
+| ---: | ---: | ---: | ---: |
+| 1 | 1.004 | 1.733 | 1.802 |
+| 8 | 0.998 | 1.754 | 1.833 |
+| 64 | 1.014 | 1.474 | 1.483 |
+| 256 | 1.006 | 1.228 | 1.245 |
+
+## 范围
+
+- **reference**：upstream `vllm==0.29.0` 的 `compute_topk_scores` 路径。
+- **candidate**：本仓库实现，保持 upstream host path。
+- `torch.topk` 是 upstream 组件，保留，不重写。
 - 本仓库不依赖 FlagGems / FlagGems-vLLM；未来与 FlagGems-vLLM 的集成 **out of scope**。
-- 当前 fused 实现仅作为 candidate / experiment，尚未证明是最终有效方案。新 H20 上会先独立测量三个 upstream kernel 的 baseline，再决定是否采用 fusion。
-- `artifacts/` 中的历史数据只用于记录，不作为新 H20 的最终性能结果。
+- 旧 fused 实现保留在 `src/h20_topk/ops/fused_experiment.py`，仅作历史实验参考，不参与当前主线，也不被 package import。
 
-## 优化对象
-
-原始执行路径大致为：
+## Upstream execution path
 
 ```text
-torch.topk
-  -> _topk_log_softmax_kernel   # row max + sum-exp + gather
-  -> _ranks_kernel              # sampled token rank
-  -> _fill_logprob_token_ids_kernel（custom token id path）
+torch.topk                         # upstream，保留
+  -> _topk_log_softmax_kernel      # row max + sum-exp + gather
+  -> _ranks_kernel                 # sampled token rank
+  -> _fill_logprob_token_ids_kernel
 ```
 
-当前 candidate 保留 `torch.topk`，重点优化 logits 扫描、log-softmax 统计、rank 计算以及相关 kernel launch / memory access 开销。
+host 侧的 `torch.topk`、`torch.cat`、`logits.gather`、`.to(torch.int32)`、
+`torch.zeros_like`、`masked_fill` 均保持 upstream 写法。
 
-## 当前 candidate 思路
+## 优化内容
 
-vLLM 原实现中，log-softmax 与 rank 计算会重复扫描 logits。
+Baseline（bf16，隔离 kernel，preallocated output）：
 
-当前 experiment 主要尝试：
+| B | V | K | _topk_log_softmax | _ranks | _fill | torch.topk | full op |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 131072 | 10 | 106.80us | 31.46us | 18.53us | 58.11us | 214.10us |
+| 8 | 131072 | 10 | 108.10us | 31.82us | 18.38us | 70.94us | 215.34us |
+| 64 | 131072 | 10 | 108.94us | 32.24us | 18.21us | 161.26us | 292.19us |
+| 256 | 151936 | 20 | 208.91us | 67.41us | 18.45us | 574.35us | 834.88us |
 
-- 融合 log-softmax 统计与 rank 计算；
-- 减少 logits 的重复全量读取；
-- 降低 kernel launch 数量；
-- 在小 batch / 大 vocab 场景下通过 split 提高 GPU 并行度；
-- 保持与 vLLM `compute_topk_scores` 输出语义一致。
+`_topk_log_softmax_kernel` 在 B<=64 时几乎恒为 ~107us，说明单 CTA 扫描是主要瓶颈。
+先做串行 launch-config 粗筛，最终只改 launch config：
 
-这些只是待验证的 candidate 设计，不代表已经取得收益；是否保留 fusion 要等新 H20 上的独立 baseline 和对比结果。
+| Kernel | V <= 32768 | V > 32768 |
+| --- | --- | --- |
+| `_topk_log_softmax_kernel` | BLOCK_SIZE=1024, num_warps=4 | BLOCK_SIZE=8192, num_warps=16 |
+| `_ranks_kernel` | BLOCK_SIZE=8192, num_warps=4 | BLOCK_SIZE=32768, num_warps=16 |
+| `_fill_logprob_token_ids_kernel` | upstream | upstream |
 
-## Benchmark 方法
+- `_fill_logprob_token_ids_kernel` 在 1/2/4 warps 下都约 18.4us，属于 launch-bound，
+  没有可观收益，保持 upstream。
+- 没有新增 Triton kernel，没有重写 `compute_topk_scores` host path。
+- candidate 与 upstream 的差异只在两个 kernel 的 launch config 和小 vocab 条件分支。
 
-reference 固定为 upstream vLLM 0.29.0，candidate 为本仓库实现。在相同输入、dtype、shape、warmup 和重复次数下测量：
+## Correctness
 
-```text
-reference (vLLM 0.29.0)
-    -> correctness check
-    -> candidate (this repository)
-    -> same workload benchmark
-    -> latency comparison
+```bash
+QUICK_MODE=1 pytest -q tests/test_compute_topk_scores.py -m compute_topk_scores
+pytest -q tests/test_compute_topk_scores.py -m compute_topk_scores
 ```
 
-性能比定义为：
+- quick：57 passed
+- full：129 passed
 
-```text
-ratio = reference latency / candidate latency
+覆盖 fp16 / bf16 / float32、不同 B/V/K、non-contiguous、ties、custom token ids、
+logits_mode、empty batch、cu_num_logits。
+
+## Benchmark
+
+串行执行，reference 与 candidate 使用相同输入、dtype、B/V/K、warmup 和 repeats：
+
+```bash
+python scripts/bench_matrix.py --target vllm \
+  --batches 1,8,64,256 --vocabs 32768,131072,151936 --ks 1,10,50 \
+  --dtypes bfloat16,float16 --warmup 20 --repeats 200 \
+  --output artifacts/new-h20/vllm.json
+
+python scripts/bench_matrix.py --target candidate \
+  --op src/h20_topk/ops/compute_topk_scores.py \
+  --batches 1,8,64,256 --vocabs 32768,131072,151936 --ks 1,10,50 \
+  --dtypes bfloat16,float16 --warmup 20 --repeats 200 \
+  --output artifacts/new-h20/candidate.json
+
+python scripts/compare_bench.py \
+  --reference artifacts/new-h20/vllm.json \
+  --candidate artifacts/new-h20/candidate.json
 ```
 
-同时记录不同 batch size、vocab size、top-k 和 dtype 下的变化，避免只依赖单一 shape 的结果。
-
-## 目录
-
-```text
-src/h20_topk/__init__.py                      # candidate package
-src/h20_topk/ops/compute_topk_scores.py       # candidate implementation
-tests/test_compute_topk_scores.py             # correctness vs vLLM 0.29.0
-benchmark/test_compute_topk_scores.py         # reference/candidate latency
-scripts/bench_components.py                   # vLLM 各阶段耗时拆解
-scripts/ablate_stats.py                       # scan/rank fusion 与 split 消融
-scripts/bench_matrix.py                       # 多 workload 延迟矩阵
-```
-
-## 已验证环境（2026-10-24）
-
-本机为 AutoDL 容器（Ubuntu 22.04.5，内核 5.15），当前为无 GPU 模式，以下版本来自实际环境：
+## 环境
 
 | 项目 | 值 |
 | --- | --- |
-| Python | 3.12.13（`/root/autodl-tmp/venv-vllm029b`） |
-| PyTorch | 2.13.0+cu130（`torch.version.cuda = 13.0`） |
+| GPU | NVIDIA H20 |
+| NVIDIA Driver | 580.105.08（宿主机） |
+| CUDA | 13.0 |
+| PyTorch | 2.13.0+cu130 |
 | Triton | 3.7.1 |
 | vLLM | 0.29.0（reference） |
-| pytest | 9.1.1 |
-| CUDA Toolkit | 13.0（`/usr/local/cuda` → `/usr/local/cuda-13.0`，nvcc V13.0.88） |
-| pip cuda-toolkit | 13.0.3.0 |
-| NVIDIA Driver | 595.71.05（宿主机，`/proc/driver/nvidia/version`） |
-| GPU | NVIDIA H20（本机通过 `/proc/driver/nvidia/gpus` 可见） |
-| CUDA available | False（当前无 GPU 模式） |
+| Python | 3.12.3 |
+| Git HEAD（测量时） | `afc64fd` |
 
-说明：
-
-- 当前容器内 `/usr/bin/nvidia-smi` 是 0 字节且不可执行，`nvidia-smi` / `torch.cuda` 均不可用；驱动版本从 `/proc/driver/nvidia/version` 读取。
-- 当前容器未安装 Docker 与 Conda；本仓库使用 Python venv + requirements，不依赖 Conda 环境文件。
-- 当前无 GPU，未运行 GPU correctness / benchmark / profiler，不做性能结论。
-
-## 新 H20 环境恢复
+## 复现
 
 ```bash
-git clone https://github.com/WHUTcjh-2024/H20-CUDA-13.0-GPU-595.71.05.git
-cd H20-CUDA-13.0-GPU-595.71.05
+git clone https://github.com/WHUTcjh-2024/H20-compute-topk-scores.git
+cd H20-compute-topk-scores
 
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip==26.2.2
 python -m pip install -r requirements/core.txt
-```
 
-验证：
-
-```bash
 python scripts/check_env.py
 bash scripts/smoke_test.sh
 ```
 
-无 GPU 时 `check_env.py` 仍以 0 退出；`smoke_test.sh` 会跳过 correctness/benchmark，设置 `REQUIRE_GPU=1` 可让缺失 GPU 直接失败。
-
-candidate 直接从 `src/h20_topk` 导入，不需要额外的第三方 kernel 库。手工运行命令时可设置：
+candidate 直接从 `src/h20_topk` 导入，不需要额外第三方 kernel 库：
 
 ```bash
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-`requirements/freeze.txt` 是当前 venv 的完整审计快照，包含机器本地路径，不用于直接安装。
+`requirements/freeze.txt` 是完整 pip freeze 审计快照，包含机器本地路径，不用于直接安装。
 
-## 新 H20 测量顺序
+## 目录
 
-先测三个 upstream kernel 的独立 baseline，再决定是否 fusion：
-
-```bash
-# 1. upstream vLLM 各阶段 baseline
-python scripts/bench_components.py --output artifacts/baseline_components.json
-
-# 2. correctness：reference 只使用 vLLM 0.29.0
-QUICK_MODE=1 pytest -q tests/test_compute_topk_scores.py -m compute_topk_scores
-
-# 3. 再对比 candidate
-python scripts/bench_matrix.py --target vllm --output artifacts/vllm.json
-python scripts/bench_matrix.py --target candidate \
-  --op src/h20_topk/ops/compute_topk_scores.py --output artifacts/candidate.json
+```text
+src/h20_topk/ops/compute_topk_scores.py       # candidate
+src/h20_topk/ops/fused_experiment.py          # 历史 fused 实验，不参与主线
+tests/test_compute_topk_scores.py             # correctness vs vLLM 0.29.0
+benchmark/test_compute_topk_scores.py         # reference/candidate latency
+benchmark/results-h20.md                      # 完整 72-case 结果
+scripts/bench_three_kernels.py                # 三个 upstream kernel 隔离 baseline
+scripts/bench_kernel_variants.py              # launch-config 串行筛选
+scripts/bench_matrix.py                       # 多 workload 延迟矩阵
+scripts/compare_bench.py                      # reference/candidate ratio 汇总
+scripts/bench_components.py                   # vLLM 各阶段耗时拆解
+scripts/check_env.py                          # 环境检查
+scripts/smoke_test.sh                         # 环境 -> import -> correctness -> benchmark
 ```
 
 ## Docker
@@ -149,28 +176,8 @@ docker build -t h20-compute-topk:cu130 .
 docker run --rm --gpus all h20-compute-topk:cu130
 ```
 
-- 镜像只包含 CUDA userspace、Python、PyTorch、Triton 和 vLLM；**NVIDIA Driver 属于宿主机，不在镜像内**。
-- 基础镜像固定为 `nvidia/cuda:13.0.0-devel-ubuntu24.04`，可通过 `--build-arg CUDA_IMAGE=...` 覆盖。
-- 当前容器未安装 Docker，且数据盘仅剩约 1.1G；本次只做了 Dockerfile 静态检查，未实际 build/pull。
-
-## 测试与 benchmark 入口
-
-```bash
-# correctness（需要 GPU）
-QUICK_MODE=1 pytest -q tests/test_compute_topk_scores.py -m compute_topk_scores
-
-# latency benchmark（reference vs candidate）
-pytest -q benchmark/test_compute_topk_scores.py -m compute_topk_scores
-```
-
-## 目录补充
-
-```text
-requirements/core.txt        # 最小核心依赖（固定版本）
-requirements/freeze.txt      # 完整 pip freeze 审计快照
-Dockerfile                   # CUDA 13.0 + vLLM 0.29.0 镜像
-scripts/check_env.py         # 无 GPU 也安全的环境检查
-scripts/smoke_test.sh        # 环境检查 -> import -> correctness -> benchmark
-tests/conftest.py            # QUICK_MODE + src 加入 sys.path
-src/h20_topk/__init__.py     # candidate package
-```
+- 镜像只包含 CUDA userspace、Python、PyTorch、Triton 和 vLLM；
+  **NVIDIA Driver 属于宿主机，不在镜像内**。
+- 基础镜像固定为 `nvidia/cuda:13.0.0-devel-ubuntu24.04`，可用
+  `--build-arg CUDA_IMAGE=...` 覆盖。
+- 本次测量容器未安装 Docker，因此只做了 Dockerfile 静态检查，未实际 build/pull。
