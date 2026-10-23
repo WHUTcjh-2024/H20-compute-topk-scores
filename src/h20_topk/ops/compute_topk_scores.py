@@ -33,10 +33,21 @@ def _topk_log_softmax_kernel(
     req_idx = tl.program_id(0).to(tl.int64)
     row_ptr = logits_ptr + req_idx * logits_stride
 
+    full = (vocab_size // BLOCK_SIZE) * BLOCK_SIZE
     max_val = float("-inf")
     se = 0.0
-    for i in range(0, vocab_size, BLOCK_SIZE):
+    for i in tl.range(
+        0, full, BLOCK_SIZE, num_stages=2, loop_unroll_factor=2
+    ):
         block = i + tl.arange(0, BLOCK_SIZE)
+        logits = tl.load(row_ptr + block).to(tl.float32)
+        block_max = tl.max(logits)
+        new_max = tl.maximum(max_val, block_max)
+        se = se * tl.exp(max_val - new_max) + tl.sum(tl.exp(logits - new_max))
+        max_val = new_max
+
+    if full < vocab_size:
+        block = full + tl.arange(0, BLOCK_SIZE)
         logits = tl.load(
             row_ptr + block, mask=block < vocab_size, other=float("-inf")
         ).to(tl.float32)
@@ -74,11 +85,20 @@ def _ranks_kernel(
     token_id = tl.load(token_ids_ptr + req_idx)
     x = tl.load(row_ptr + token_id)
 
+    full = (vocab_size // BLOCK_SIZE) * BLOCK_SIZE
     n = 0
-    for i in tl.range(0, vocab_size, BLOCK_SIZE, num_stages=2):
+    for i in tl.range(0, full, BLOCK_SIZE, num_stages=4):
         block = i + tl.arange(0, BLOCK_SIZE)
-        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
+        logits = tl.load(row_ptr + block)
         n += tl.sum((logits >= x).to(tl.int32))
+
+    if full < vocab_size:
+        block = full + tl.arange(0, BLOCK_SIZE)
+        logits = tl.load(
+            row_ptr + block, mask=block < vocab_size, other=float("-inf")
+        )
+        n += tl.sum((logits >= x).to(tl.int32))
+
     tl.store(output_ptr + req_idx, n)
 
 
@@ -209,32 +229,34 @@ def _fill_logprob_token_ids_kernel(
 ):
     batch_idx = tl.program_id(0)
 
-    # Column 0: always the sampled token, always valid.
     sampled = tl.load(sampled_token_ids_ptr + batch_idx)
-    tl.store(out_token_ids_ptr + batch_idx * out_token_ids_stride, sampled)
-    tl.store(out_valid_mask_ptr + batch_idx * out_valid_mask_stride, 1)
-
     req_state_idx = tl.load(expanded_idx_mapping_ptr + batch_idx)
     num_custom = tl.load(num_per_req_token_ids_ptr + req_state_idx)
 
     col = tl.max_contiguous(
         tl.multiple_of(tl.arange(0, PADDED_COLS), PADDED_COLS), PADDED_COLS
     )
-    tid_base = out_token_ids_ptr + batch_idx * out_token_ids_stride + 1
-    mask_base = out_valid_mask_ptr + batch_idx * out_valid_mask_stride + 1
-
     if num_custom > 0:
-        # Override topk with per-request custom tokens.
         src = per_req_token_ids_ptr + req_state_idx * per_req_token_ids_stride
         valid = col < num_custom
     else:
-        # Fill with topk indices (no-op when NUM_TOPK == 0).
         src = topk_indices_ptr + batch_idx * topk_indices_stride
         valid = col < NUM_TOPK
 
     tokens = tl.load(src + col, mask=valid, other=0).to(tl.int64)
-    tl.store(tid_base + col, tokens, mask=valid)
-    tl.store(mask_base + col, tl.full([PADDED_COLS], 1, tl.int1), mask=valid)
+
+    tl.store(out_token_ids_ptr + batch_idx * out_token_ids_stride, sampled)
+    tl.store(out_valid_mask_ptr + batch_idx * out_valid_mask_stride, 1)
+    tl.store(
+        out_token_ids_ptr + batch_idx * out_token_ids_stride + 1 + col,
+        tokens,
+        mask=valid,
+    )
+    tl.store(
+        out_valid_mask_ptr + batch_idx * out_valid_mask_stride + 1 + col,
+        tl.full([PADDED_COLS], 1, tl.int1),
+        mask=valid,
+    )
 
 
 class LogprobTokenIdsState:
