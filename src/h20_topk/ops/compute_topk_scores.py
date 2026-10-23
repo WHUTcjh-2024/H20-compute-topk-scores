@@ -3,10 +3,8 @@
 
 """Candidate implementation of vLLM 0.29.0 ``compute_topk_scores``.
 
-The host path is kept aligned with upstream. Only the launch configuration of
-``_topk_log_softmax_kernel`` and ``_ranks_kernel`` is changed. Small vocab
-sizes keep the upstream launch configuration to avoid a regression; larger
-vocab sizes use the measured H20 configuration.
+Only the bodies of the three target kernels are changed. The host path and
+upstream launch configurations are preserved.
 """
 
 import numpy as np
@@ -36,21 +34,17 @@ def _topk_log_softmax_kernel(
     row_ptr = logits_ptr + req_idx * logits_stride
 
     max_val = float("-inf")
-    for i in range(0, vocab_size, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
-        max_val = tl.max(tl.maximum(logits, max_val))
-    max_val = max_val.to(tl.float32)  # type: ignore
-
     se = 0.0
     for i in range(0, vocab_size, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
-        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=0.0)
-        # NOTE(woosuk): Make sure that logits and all following operations use FP32.
-        logits = logits.to(tl.float32)
-        e = tl.exp(logits - max_val)
-        e = tl.where(block < vocab_size, e, 0.0)
-        se += tl.sum(e)
+        logits = tl.load(
+            row_ptr + block, mask=block < vocab_size, other=float("-inf")
+        ).to(tl.float32)
+        block_max = tl.max(logits)
+        new_max = tl.maximum(max_val, block_max)
+        se = se * tl.exp(max_val - new_max) + tl.sum(tl.exp(logits - new_max))
+        max_val = new_max
+
     lse = tl.log(se)
 
     for j in range(0, topk, TOPK_BLOCK_SIZE):
@@ -81,7 +75,7 @@ def _ranks_kernel(
     x = tl.load(row_ptr + token_id)
 
     n = 0
-    for i in range(0, vocab_size, BLOCK_SIZE):
+    for i in tl.range(0, vocab_size, BLOCK_SIZE, num_stages=2):
         block = i + tl.arange(0, BLOCK_SIZE)
         logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
         n += tl.sum((logits >= x).to(tl.int32))
@@ -101,10 +95,6 @@ def compute_token_logprobs(
     # Cap the kernel's per-iteration width so very large num_logprobs requests
     # stream the gather in bounded-size chunks, avoiding excessive mem use.
     topk_block_size = min(triton.next_power_of_2(num_logprobs), _MAX_TOPK_BLOCK)
-    if vocab_size <= 32768:
-        block_size, num_warps = 1024, 4
-    else:
-        block_size, num_warps = 8192, 16
     _topk_log_softmax_kernel[(batch_size,)](
         logprobs,
         logits,
@@ -112,9 +102,8 @@ def compute_token_logprobs(
         token_ids,
         num_logprobs,
         vocab_size,
-        BLOCK_SIZE=block_size,  # type: ignore
+        BLOCK_SIZE=1024,  # type: ignore
         TOPK_BLOCK_SIZE=topk_block_size,
-        num_warps=num_warps,
     )
     return logprobs
 
@@ -182,18 +171,13 @@ def compute_topk_scores(
         scores = scores.masked_fill(~valid_mask, float("-inf"))
 
     token_ranks = torch.empty(batch_size, dtype=torch.int64, device=logits.device)
-    if vocab_size <= 32768:
-        rank_block_size, rank_num_warps = 8192, 4
-    else:
-        rank_block_size, rank_num_warps = 32768, 16
     _ranks_kernel[(batch_size,)](
         token_ranks,
         logits,
         logits.stride(0),
         sampled_token_ids,
         vocab_size,
-        BLOCK_SIZE=rank_block_size,  # type: ignore
-        num_warps=rank_num_warps,
+        BLOCK_SIZE=8192,  # type: ignore
     )
     is_tensor = isinstance(cu_num_logits, torch.Tensor)
     return LogprobsTensors(
@@ -233,7 +217,9 @@ def _fill_logprob_token_ids_kernel(
     req_state_idx = tl.load(expanded_idx_mapping_ptr + batch_idx)
     num_custom = tl.load(num_per_req_token_ids_ptr + req_state_idx)
 
-    col = tl.arange(0, PADDED_COLS)
+    col = tl.max_contiguous(
+        tl.multiple_of(tl.arange(0, PADDED_COLS), PADDED_COLS), PADDED_COLS
+    )
     tid_base = out_token_ids_ptr + batch_idx * out_token_ids_stride + 1
     mask_base = out_valid_mask_ptr + batch_idx * out_valid_mask_stride + 1
 
