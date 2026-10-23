@@ -15,27 +15,27 @@ Target GPU: NVIDIA H20.
 
 | 指标 | 值 |
 | --- | ---: |
-| ratio min | 0.991 |
-| ratio p10 | 1.002 |
-| ratio median | 1.359 |
-| ratio mean | 1.388 |
-| ratio p90 | 1.805 |
-| ratio max | 1.907 |
+| ratio min | 1.006 |
+| ratio p10 | 1.011 |
+| ratio median | 1.114 |
+| ratio mean | 1.105 |
+| ratio p90 | 1.189 |
+| ratio max | 1.202 |
 | ratio < 0.8 | 0 |
-| 0.8 <= ratio < 1.0 | 5 |
-| ratio >= 1.0 | 67 |
+| 0.8 <= ratio < 1.0 | 0 |
+| ratio >= 1.0 | 72 |
 
-5 个低于 1.0 的 case 都是 `V=32768`，ratio 在 `0.991–0.996`，属于 launch config 与测量噪声范围。完整 72 行表格见
+全部 72 个 case 都 >= 1.0。`V=32768` 的 case 在 `1.006–1.023`，大 vocab case 在 `1.09–1.202`。完整 72 行表格见
 [`benchmark/results-h20.md`](benchmark/results-h20.md)。
 
 按 B/V 聚合的中位 ratio：
 
 | B | V=32768 | V=131072 | V=151936 |
 | ---: | ---: | ---: | ---: |
-| 1 | 1.004 | 1.733 | 1.802 |
-| 8 | 0.998 | 1.754 | 1.833 |
-| 64 | 1.014 | 1.474 | 1.483 |
-| 256 | 1.006 | 1.228 | 1.245 |
+| 1 | 1.011 | 1.175 | 1.188 |
+| 8 | 1.019 | 1.178 | 1.196 |
+| 64 | 1.013 | 1.120 | 1.123 |
+| 256 | 1.012 | 1.095 | 1.106 |
 
 ## 范围
 
@@ -43,7 +43,7 @@ Target GPU: NVIDIA H20.
 - **candidate**：本仓库实现，保持 upstream host path。
 - `torch.topk` 是 upstream 组件，保留，不重写。
 - 本仓库不依赖 FlagGems / FlagGems-vLLM；未来与 FlagGems-vLLM 的集成 **out of scope**。
-- 旧 fused 实现保留在 `src/h20_topk/ops/fused_experiment.py`，仅作历史实验参考，不参与当前主线，也不被 package import。
+- `src/h20_topk/ops/` 中只有这三个目标 kernel，没有额外的历史 kernel 文件。
 
 ## Upstream execution path
 
@@ -69,18 +69,18 @@ Baseline（bf16，隔离 kernel，preallocated output）：
 | 256 | 151936 | 20 | 208.91us | 67.41us | 18.45us | 574.35us | 834.88us |
 
 `_topk_log_softmax_kernel` 在 B<=64 时几乎恒为 ~107us，说明单 CTA 扫描是主要瓶颈。
-先做串行 launch-config 粗筛，最终只改 launch config：
+优化全部放在三个 kernel body 内，host path 和 upstream launch config 保持不变：
 
-| Kernel | V <= 32768 | V > 32768 |
+| Kernel | Body change | 隔离延迟变化（bf16） |
 | --- | --- | --- |
-| `_topk_log_softmax_kernel` | BLOCK_SIZE=1024, num_warps=4 | BLOCK_SIZE=8192, num_warps=16 |
-| `_ranks_kernel` | BLOCK_SIZE=8192, num_warps=4 | BLOCK_SIZE=32768, num_warps=16 |
-| `_fill_logprob_token_ids_kernel` | upstream | upstream |
+| `_topk_log_softmax_kernel` | online log-sum-exp，一次 vocab pass 代替 max + sum-exp 两次 pass | 104→83us（V=131072）；209→143us（B=256） |
+| `_ranks_kernel` | `tl.range(..., num_stages=2)` 对 vocab scan 做流水 | 31→23us（V=131072）；67→50us（B=256） |
+| `_fill_logprob_token_ids_kernel` | 连续/对齐 offset hint | ~18.4→18.4us，launch-bound |
 
-- `_fill_logprob_token_ids_kernel` 在 1/2/4 warps 下都约 18.4us，属于 launch-bound，
-  没有可观收益，保持 upstream。
-- 没有新增 Triton kernel，没有重写 `compute_topk_scores` host path。
-- candidate 与 upstream 的差异只在两个 kernel 的 launch config 和小 vocab 条件分支。
+- `_fill_logprob_token_ids_kernel` 在 B=1..256、1/2/4 warps 下都约 18.4us，属于 launch-bound；
+  body hint 不产生可测收益，但保留为最小 body 改动，结论是 **non-bottleneck**。
+- 没有新增 Triton kernel，没有重写 `compute_topk_scores` host path，没有改 launch config。
+- candidate 与 upstream 的差异只在三个 kernel body 和文件顶部 docstring。
 
 ## Correctness
 
@@ -127,7 +127,7 @@ python scripts/compare_bench.py \
 | Triton | 3.7.1 |
 | vLLM | 0.29.0（reference） |
 | Python | 3.12.3 |
-| Git HEAD（测量时） | `afc64fd` |
+| Git HEAD（测量时） | `425c59e` |
 
 ## 复现
 
@@ -155,13 +155,12 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 ## 目录
 
 ```text
-src/h20_topk/ops/compute_topk_scores.py       # candidate
-src/h20_topk/ops/fused_experiment.py          # 历史 fused 实验，不参与主线
+src/h20_topk/ops/compute_topk_scores.py       # candidate（三个目标 kernel）
 tests/test_compute_topk_scores.py             # correctness vs vLLM 0.29.0
 benchmark/test_compute_topk_scores.py         # reference/candidate latency
 benchmark/results-h20.md                      # 完整 72-case 结果
 scripts/bench_three_kernels.py                # 三个 upstream kernel 隔离 baseline
-scripts/bench_kernel_variants.py              # launch-config 串行筛选
+scripts/bench_kernel_variants.py              # launch-config 诊断（非主线）
 scripts/bench_matrix.py                       # 多 workload 延迟矩阵
 scripts/compare_bench.py                      # reference/candidate ratio 汇总
 scripts/bench_components.py                   # vLLM 各阶段耗时拆解
