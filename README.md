@@ -10,32 +10,32 @@ Target GPU: NVIDIA H20.
 ## 结果
 
 - Correctness：quick 57/57，full 129/129。
-- Benchmark：72 个 case，串行测量，CUDA events，warmup=20，repeats=200，取 median。
+- Benchmark：72 个 case，串行测量，CUDA events，warmup=20，repeats=500，取 median。
 - `ratio = reference latency / candidate latency`：
 
 | 指标 | 值 |
 | --- | ---: |
-| ratio min | 1.006 |
-| ratio p10 | 1.011 |
-| ratio median | 1.114 |
-| ratio mean | 1.105 |
-| ratio p90 | 1.189 |
-| ratio max | 1.202 |
+| ratio min | 0.980 |
+| ratio p10 | 0.990 |
+| ratio median | 1.172 |
+| ratio mean | 1.149 |
+| ratio p90 | 1.262 |
+| ratio max | 1.280 |
 | ratio < 0.8 | 0 |
-| 0.8 <= ratio < 1.0 | 0 |
-| ratio >= 1.0 | 72 |
+| 0.8 <= ratio < 1.0 | 10 |
+| ratio >= 1.0 | 62 |
 
-全部 72 个 case 都 >= 1.0。`V=32768` 的 case 在 `1.006–1.023`，大 vocab case 在 `1.09–1.202`。完整 72 行表格见
+全部 case 都 >= 0.98。10 个低于 1.0 的 case 都是 `V=32768`、`B=1/8`，ratio 在 `0.980–1.001`；大 vocab case 在 `1.09–1.28`。完整 72 行表格见
 [`benchmark/results-h20.md`](benchmark/results-h20.md)。
 
 按 B/V 聚合的中位 ratio：
 
 | B | V=32768 | V=131072 | V=151936 |
 | ---: | ---: | ---: | ---: |
-| 1 | 1.011 | 1.175 | 1.188 |
-| 8 | 1.019 | 1.178 | 1.196 |
-| 64 | 1.013 | 1.120 | 1.123 |
-| 256 | 1.012 | 1.095 | 1.106 |
+| 1 | 0.986 | 1.236 | 1.262 |
+| 8 | 0.992 | 1.251 | 1.273 |
+| 64 | 1.043 | 1.192 | 1.197 |
+| 256 | 1.045 | 1.158 | 1.169 |
 
 ## 范围
 
@@ -73,12 +73,12 @@ Baseline（bf16，隔离 kernel，preallocated output）：
 
 | Kernel | Body change | 隔离延迟变化（bf16） |
 | --- | --- | --- |
-| `_topk_log_softmax_kernel` | online log-sum-exp，一次 vocab pass 代替 max + sum-exp 两次 pass | 104→83us（V=131072）；209→143us（B=256） |
-| `_ranks_kernel` | `tl.range(..., num_stages=2)` 对 vocab scan 做流水 | 31→23us（V=131072）；67→50us（B=256） |
-| `_fill_logprob_token_ids_kernel` | 连续/对齐 offset hint | ~18.4→18.4us，launch-bound |
+| `_topk_log_softmax_kernel` | online LSE + full-block/tail split + `tl.range(num_stages=2, loop_unroll_factor=2)` | 105→75us（V=131072）；210→120us（B=256） |
+| `_ranks_kernel` | full-block/tail split + `tl.range(num_stages=4)` | 31→19.4us（V=131072）；67→37.9us（B=256） |
+| `_fill_logprob_token_ids_kernel` | loads-first + 连续/对齐 hint | ~18.7→18.7us，launch-bound |
 
-- `_fill_logprob_token_ids_kernel` 在 B=1..256、1/2/4 warps 下都约 18.4us，属于 launch-bound；
-  body hint 不产生可测收益，但保留为最小 body 改动，结论是 **non-bottleneck**。
+- fill 的 loads-first / write-through / no-custom 变体都在 18.6–18.8us，空 kernel 下限约 13.1us；
+  剩余约 5.5us 是 token/mask 的实际访存。loads-first 作为最小 body 改动保留，结论是 **non-bottleneck**。
 - 没有新增 Triton kernel，没有重写 `compute_topk_scores` host path，没有改 launch config。
 - candidate 与 upstream 的差异只在三个 kernel body 和文件顶部 docstring。
 
@@ -102,13 +102,13 @@ logits_mode、empty batch、cu_num_logits。
 ```bash
 python scripts/bench_matrix.py --target vllm \
   --batches 1,8,64,256 --vocabs 32768,131072,151936 --ks 1,10,50 \
-  --dtypes bfloat16,float16 --warmup 20 --repeats 200 \
+  --dtypes bfloat16,float16 --warmup 20 --repeats 500 \
   --output artifacts/new-h20/vllm.json
 
 python scripts/bench_matrix.py --target candidate \
   --op src/h20_topk/ops/compute_topk_scores.py \
   --batches 1,8,64,256 --vocabs 32768,131072,151936 --ks 1,10,50 \
-  --dtypes bfloat16,float16 --warmup 20 --repeats 200 \
+  --dtypes bfloat16,float16 --warmup 20 --repeats 500 \
   --output artifacts/new-h20/candidate.json
 
 python scripts/compare_bench.py \
@@ -127,7 +127,7 @@ python scripts/compare_bench.py \
 | Triton | 3.7.1 |
 | vLLM | 0.29.0（reference） |
 | Python | 3.12.3 |
-| Git HEAD（测量时） | `425c59e` |
+| Git HEAD（测量时） | `42ef89b` |
 
 ## 复现
 
