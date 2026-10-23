@@ -207,14 +207,16 @@ def test_compute_topk_scores_custom_token_ids(num_logprobs, max_custom):
 
 
 @pytest.mark.compute_topk_scores
-def test_compute_topk_scores_rejects_bad_inputs():
+def test_compute_topk_scores_int16_sampled_ids_matches_vllm():
+    # Upstream vLLM 0.29.0 does not validate empty vocab; that case triggers an
+    # illegal CUDA access in both reference and candidate, so it is not tested.
     logits, sampled = _make_inputs(2, 1024, torch.float32)
-    with pytest.raises(NotImplementedError):
-        compute_topk_scores(logits, 5, sampled.to(torch.int16))
-    with pytest.raises(NotImplementedError):
-        compute_topk_scores(
-            torch.empty((2, 0), device=device), 0, sampled
-        )
+    sampled = sampled.to(torch.int16)
+    ref = _vllm_fn(logits, 5, sampled)
+    out = compute_topk_scores(logits, 5, sampled)
+    assert torch.equal(out.logprob_token_ids, ref.logprob_token_ids)
+    assert torch.equal(out.selected_token_ranks, ref.selected_token_ranks)
+    torch.testing.assert_close(out.logprobs, ref.logprobs, atol=2e-3, rtol=1e-5)
 
 
 @pytest.mark.compute_topk_scores
