@@ -1,5 +1,5 @@
-# Host NVIDIA driver is NOT part of this image. The container needs the host
-# driver (595.71.05 on the verified H20) and the NVIDIA Container Toolkit.
+# Host NVIDIA driver is NOT part of this image. The container requires a
+# compatible host driver and the NVIDIA Container Toolkit.
 # The base tag is pinned; override with --build-arg CUDA_IMAGE=... if needed.
 ARG CUDA_IMAGE=nvidia/cuda:13.0.0-devel-ubuntu24.04
 FROM ${CUDA_IMAGE}
