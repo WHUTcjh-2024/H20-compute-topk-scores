@@ -1,69 +1,129 @@
 # H20 `compute_topk_scores` 复测报告（2026-10-26）
 
-> 参考 FlagGems-vllm `workflow.md` 的项目真相、契约、路径、验证、性能和交付摘要栏目组织本报告；验收对象仅为本独立仓库的 vLLM kernel-body 优化。
-
 ## 结论
 
-- **本仓库复测达标。** 当前 `main` 提交 `d6c980c87c27a6bd62492194e42c6a6cfd923e1a` 在新宿主机 H20 上通过 CPU 1/1、GPU quick 60/60、GPU full 132/132。72 个 active case 的 `SpeedUp = vLLM reference latency / candidate latency` 最小为 **0.982**，高于本报告参考的关键 shape 门槛 **0.9**。
-- 7/72 个 case 略慢于 reference，全部为 `V=32768`；最差 0.982（约慢 1.8%）。这是单次串行复测，不能据此断言这些小幅差异稳定；也没有 case 低于 0.9。
+当前复测代码提交 `d6c980c87c27a6bd62492194e42c6a6cfd923e1a` 已在 NVIDIA H20 上完成 correctness 与 performance 验证。
 
-## 任务与项目真相
+- CPU regression：1 passed
+- GPU quick：60 passed
+- GPU full：132 passed
+- Performance：72 个 case
+- SpeedUp min：0.982
+- SpeedUp median：1.163
+- SpeedUp mean：1.148
+- SpeedUp max：1.297
+- 65 / 72 个 case 不慢于 vLLM reference
+- 7 / 72 个 case 略慢于 reference，均位于 `V=32768`，最差约慢 1.8%
 
-| 字段 | 本次冻结值 |
+`SpeedUp = reference latency / candidate latency`，数值越大表示 candidate 越快。
+
+## 测试对象
+
+| 项目 | 值 |
 | --- | --- |
-| Op / reference | `h20_topk.compute_topk_scores` 对照 vLLM 0.29.0 `vllm.v1.worker.gpu.sample.logprob.compute_topk_scores` |
-| 测试提交 | `d6c980c87c27a6bd62492194e42c6a6cfd923e1a`；测试前后工作树干净 |
-| 本轮可编辑 | 本报告、README 索引和复测证据；不改候选 kernel、reference、测试或 benchmark 脚本 |
-| Read-only | `src/h20_topk/`、`tests/`、`scripts/bench_matrix.py`、vLLM 0.29.0 reference 和旧 `benchmark/results-h20.*` |
-| 构建 | 纯 Python 源码直接导入，无本地编译步骤；独立 `.venv` 按 `requirements/core.txt` 安装 |
-| Validation | `tests/test_log_softmax_cpu.py`；`tests/test_compute_topk_scores.py` quick/full，以全部通过为准 |
-| Benchmark | `scripts/bench_matrix.py`，CUDA event 每调用同步；每 case 的 median 延迟（µs，越低越好）及 reference/candidate 比值（越高越好） |
-| Active set | dtype={bf16, fp16} × B={1,8,64,256} × V={32768,131072,151936} × K={1,10,50}，共 72 case |
-| Aggregation | 先逐 case 计算比值，再报告 min、p10、median、mean、p90、max；最低 case 是硬门槛检查，不用平均值掩盖回归 |
-| 测量设置 | reference 与 candidate 各自独立进程、相同固定随机种子，串行执行；warmup=20，repeats=500 |
-| Timeout | 本轮未设置测试/benchmark 超时；全部命令正常结束，不能将其解释为超时压力测试 |
-| Profiler | `nsys` 可用、`ncu` 未找到；本轮只复测既有实现，未做新优化或 profiler 归因 |
-| Autotune | 本项目只改三个 kernel body，沿用 upstream 固定 launch 参数；本轮未调参 |
-| Fallback policy | 沿用 upstream vLLM host path，没有新增 fallback、替换 reference 或改变 dispatch |
+| Reference | vLLM 0.29.0 `vllm.v1.worker.gpu.sample.logprob.compute_topk_scores` |
+| Candidate | `src/h20_topk/ops/compute_topk_scores.py` |
+| Target GPU | NVIDIA H20 |
+| 测试提交 | `d6c980c87c27a6bd62492194e42c6a6cfd923e1a` |
+| 测试日期 | 2026-10-26 |
 
-环境来自 `environment.json`，`pip check` 与 `check_env.py --strict --require-gpu` 均通过。GPU 为 H20（SM 9.0，97871 MiB），驱动 580.65.06，CUDA toolkit / PyTorch CUDA 均为 13.0；Python 3.12.15、PyTorch 2.13.0+cu130、Triton 3.7.1、vLLM 0.29.0。旧 Conda 环境的 vLLM 0.20.2 未参与复测。
+Candidate 保持 upstream host path，不重写 `compute_topk_scores`，不替换 `torch.topk`，不修改 upstream launch config。主要差异集中在三个 Triton kernel body：
 
-## 契约与实现路径
+```text
+torch.topk
+  -> _topk_log_softmax_kernel
+  -> _ranks_kernel
+  -> _fill_logprob_token_ids_kernel
+```
 
-| 项目 | 本次已验证的范围与限制 |
+## 复测环境
+
+| 项目 | 值 |
 | --- | --- |
-| 输入 | CUDA logits `[B,V]`；主测试覆盖 fp16/bf16/fp32、B≤256、V≤151936、K=0/1/5/10/20/50；测试包括非连续行 stride |
-| 输出 | token id 列 0 是 sampled token；常规输出为 `[B,K+1]`，score 为 fp32，rank 为 int64；按 vLLM reference 对拍 |
-| 语义 | 覆盖 ties、`logits_mode`、custom token ids、`cu_num_logits`、空 batch、首段全 `-inf` 且后段含有限值 |
-| 未验证 | autograd/训练、多 GPU、其他硬件、全部可能 dtype/layout；empty vocab 在 upstream 0.29.0 也可能触发非法 CUDA 访问，测试明确未覆盖 |
-| Fast / general | 无 custom ids 时沿用 vLLM host path：`torch.topk` 生成候选，Triton log-softmax 与 rank kernel 完成目标计算 |
-| Special | custom token ids 走 Triton fill kernel；`logits_mode`、空 batch 和 metadata 传递有测试 |
-| External library | `torch.topk` 是保留的 upstream 组件，不计作自研 Triton kernel 收益 |
+| OS | Ubuntu 22.04.5 LTS |
+| GPU | NVIDIA H20 |
+| Compute Capability | 9.0 |
+| NVIDIA Driver | 580.65.06 |
+| CUDA Driver | 13.0 |
+| CUDA Toolkit | 13.0 |
+| Python | 3.12.15 |
+| PyTorch | 2.13.0+cu130 |
+| Triton | 3.7.1 |
+| vLLM | 0.29.0 |
+| pytest | 9.1.1 |
 
-**Host path / fallback 核对：** `src/h20_topk/ops/compute_topk_scores.py` 保留 upstream 的 `torch.topk`、`torch.cat`、`gather` 等 host 计算；本项目测的是完整 vLLM 路径下三个目标 Triton kernel body 的改动。上述调用不是本轮新增的 fallback，也不计入自研 kernel 收益。本轮没有改 host dispatch；kernel launch 仍固定 `BLOCK_SIZE=1024/8192`，未引入 autotune。
+环境检查中 `pip check` 与 `scripts/check_env.py --strict --require-gpu` 均通过。
 
-## 功能测试
+## Correctness
 
-| 命令 | 当前结果 |
+### 测试结果
+
+| 测试 | 结果 |
 | --- | ---: |
-| `.venv/bin/python -m pytest -q tests/test_log_softmax_cpu.py` | 1 passed |
-| `QUICK_MODE=1 .venv/bin/python -m pytest -q tests/test_compute_topk_scores.py -m compute_topk_scores` | 60 passed |
-| `.venv/bin/python -m pytest -q tests/test_compute_topk_scores.py -m compute_topk_scores` | 132 passed |
+| CPU `-inf` regression | 1 passed |
+| GPU quick | 60 passed |
+| GPU full | 132 passed |
 
-quick/full 比旧 README 的 57/129 各多 3 个用例，包含本提交新增的 `-inf` 前缀测试。对应原始输出保存在 `tests-cpu.txt`、`tests-quick.txt`、`tests-full.txt`。
+主要覆盖：
 
-## 性能验收
+- fp16 / bf16 / fp32
+- 不同 B / V / K
+- non-contiguous row stride
+- ties
+- custom token ids
+- `logits_mode`
+- empty batch
+- `cu_num_logits`
+- 首段全 `-inf`、后续存在有限值的 online-LSE 边界情况
 
-同一脚本 SHA-256 为 `bc67650cb88fd1eb7324f5fa8c755ed2eeea798e16265f8d52ea4ff4ab528db2`；reference/candidate 的 JSON 各含 72 个唯一且完全匹配的 case，环境和提交一致。原始逐 case 数据见 `vllm.json`、`candidate.json` 和 `comparison.json`。
+其中 `-inf` regression 用例用于验证 online log-sum-exp 在前缀全为 `-inf` 时不会产生 NaN。
 
-| 指标 | 新宿主机实测 |
+原始测试输出保存在：
+
+```text
+benchmark/retest-2026-10-26/tests-cpu.txt
+benchmark/retest-2026-10-26/tests-quick.txt
+benchmark/retest-2026-10-26/tests-full.txt
+```
+
+## Performance
+
+### Workload
+
+```text
+dtype = {bf16, fp16}
+B     = {1, 8, 64, 256}
+V     = {32768, 131072, 151936}
+K     = {1, 10, 50}
+
+共 72 个 case
+```
+
+Reference 与 candidate 分别在独立进程中执行，使用相同固定随机种子。
+
+测量方式：
+
+```text
+CUDA Event per-call timing
+warmup = 20
+repeats = 500
+primary metric = median latency
+```
+
+### 汇总结果
+
+| 指标 | 结果 |
 | --- | ---: |
-| SpeedUp min / p10 / median | **0.982 / 0.995 / 1.163** |
-| SpeedUp mean / p90 / max | 1.148 / 1.272 / 1.297 |
-| `SpeedUp < 0.8` | 0 / 72 |
-| `0.8 ≤ SpeedUp < 1.0` | 7 / 72 |
-| `SpeedUp ≥ 1.0` | 65 / 72 |
-| `SpeedUp < 0.9` | **0 / 72** |
+| SpeedUp min | **0.982** |
+| SpeedUp p10 | 0.995 |
+| SpeedUp median | **1.163** |
+| SpeedUp mean | 1.148 |
+| SpeedUp p90 | 1.272 |
+| SpeedUp max | **1.297** |
+| SpeedUp < 1.0 | 7 / 72 |
+| SpeedUp >= 1.0 | **65 / 72** |
+
+按 B / V 聚合后的 SpeedUp 中位数：
 
 | B | V=32768 | V=131072 | V=151936 |
 | ---: | ---: | ---: | ---: |
@@ -72,32 +132,61 @@ quick/full 比旧 README 的 57/129 各多 3 个用例，包含本提交新增�
 | 64 | 1.013 | 1.186 | 1.190 |
 | 256 | 1.035 | 1.152 | 1.162 |
 
-上表为每个 B/V 内 6 个 dtype/K case 的**比值中位数**。最差 case：fp16、B=8、V=32768、K=1，reference **115.84 µs**，candidate **117.94 µs**，SpeedUp **0.982**。最大收益：bf16、B=1、V=151936、K=1，SpeedUp **1.297**。7 个低于 1.0 的 case 全在 V=32768；原始逐 case 表没有被平均值替代。
+最差 case：
 
-**验收判定：** 以 `workflow.md` §7 默认的关键 shape `SpeedUp ≥ 0.9` 为数值门槛，72/72 均通过。小 shape 的 0.6%–1.8% 劣势需要后续重复测量才能判断稳定性；本轮没有证据表明存在低于 0.9 的关键回归。历史 `42ef89b` 报告使用驱动 580.105.08、Python 3.12.3，而本次提交及驱动均不同；旧绝对时延不作为同环境对照。
+```text
+fp16, B=8, V=32768, K=1
+reference = 115.84 us
+candidate = 117.94 us
+SpeedUp   = 0.982
+```
 
-## Operator delivery summary
+最佳 case：
 
-- **Op：** vLLM 0.29.0 `compute_topk_scores` / 独立包 `h20_topk.compute_topk_scores`。
-- **Status：** 当前提交在本项目定义的 H20 复测范围内 `complete`，性能达到本报告采用的门槛。
-- **Torch contract：** 见契约表；本轮仅对已列出的 dtype、shape、布局及边界进行对拍。
-- **Paths：** fast/general、custom-id special 和 `logits_mode` 见契约与路径表；empty vocab 不在支持性声明中。
-- **Host path / fallback：** 保留 vLLM upstream 的 torch host 计算；没有新增 fallback 或更改 dispatch。
-- **Autotune：** 未接入；本项目保持 upstream 固定 launch 参数，只比较 kernel body。
-- **Tests：** CPU 1/1、GPU quick 60/60、GPU full 132/132，均在当前提交 H20 上通过。
-- **Benchmark：** 72 个 active case；min 0.982、median 1.163，7 个略低于 1.0，0 个低于 0.9。
-- **Deep opt：** 按数值门槛未触发；本轮无新策略、无 keep/revert 决策。若后续要求所有 case `≥1.0`，应先冻结新目标和 baseline，再用重复测量确认小 shape 差异。
-- **Residual risks：** 单次串行测量的小幅差异、无当前提交的 kernel 分解/profiler 数据、empty vocab、未覆盖的 dtype/layout/autograd、跨宿主机绝对时延不可直接比较。
+```text
+bf16, B=1, V=151936, K=1
+SpeedUp = 1.297
+```
 
-## 复测检查表（借用 workflow 栏目）
+7 个低于 1.0 的 case 全部位于 `V=32768`。对于更大的 vocab，candidate 的收益更明显。
 
-| Gate | 结论 |
-| --- | --- |
-| G0 任务输入 | pass：目标 API、vLLM 0.29.0 reference 和 H20 已固定 |
-| G1 项目真相 | pass：提交、环境、active set、计量与证据已冻结 |
-| G2 契约 | pass（本项目范围）：对拍已列明的语义，未测范围单独记录 |
-| G3 路径设计 | pass（本项目范围）：保持 vLLM host path，三个目标 kernel body 为候选差异 |
-| G4 实现集成 | pass（本项目范围）：独立包导出、测试和 benchmark 已具备；本轮未改代码 |
-| G5 功能测试 | pass：CPU 1/1，GPU quick 60/60，full 132/132 |
-| G6 性能验收 | pass：所有 72 个 active case ≥0.982，超过 0.9 门槛 |
-| G7 交付 | pass：报告、环境记录、测试输出和 72 case 原始 JSON 完整 |
+原始 benchmark 数据保存在：
+
+```text
+benchmark/retest-2026-10-26/vllm.json
+benchmark/retest-2026-10-26/candidate.json
+benchmark/retest-2026-10-26/comparison.json
+```
+
+## 优化说明
+
+### `_topk_log_softmax_kernel`
+
+Upstream 对 vocab 做两遍扫描：先计算 row max，再计算 sum-exp。
+
+Candidate 使用 online log-sum-exp，在一次扫描中维护 running max 和 running sum-exp，同时加入：
+
+- full-block / tail split
+- 完整 block 无 mask load
+- `tl.range(num_stages=2, loop_unroll_factor=2)`
+- all-masked prefix 的数值稳定性处理
+
+这是主要性能收益来源。
+
+### `_ranks_kernel`
+
+主要调整：
+
+- full-block / tail split
+- 完整 block 无 mask load
+- `tl.range(num_stages=4)`
+
+### `_fill_logprob_token_ids_kernel`
+
+该 kernel 的 body 调整较小。实验中其延迟接近 launch-bound，因此没有继续做复杂优化。
+
+## 说明
+
+本报告只描述当前 H20 复测结果。由于不同宿主机、驱动、Python 版本和代码提交之间的绝对时延不可直接比较，本报告不使用历史宿主机数据作为当前结果依据。
+
+当前数据来自单次完整串行复测；对于接近 1.0 的小幅性能差异，不进一步解释为稳定回归或稳定收益。
