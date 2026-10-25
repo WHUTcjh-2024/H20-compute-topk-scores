@@ -43,7 +43,12 @@ def _topk_log_softmax_kernel(
         logits = tl.load(row_ptr + block).to(tl.float32)
         block_max = tl.max(logits)
         new_max = tl.maximum(max_val, block_max)
-        se = se * tl.exp(max_val - new_max) + tl.sum(tl.exp(logits - new_max))
+        # Keep the accumulator at zero until a finite logit appears. An
+        # all-masked prefix otherwise evaluates -inf - -inf and poisons se.
+        normalizer = tl.where(new_max == float("-inf"), 0.0, new_max)
+        se = se * tl.exp(max_val - normalizer) + tl.sum(
+            tl.exp(logits - normalizer)
+        )
         max_val = new_max
 
     if full < vocab_size:
@@ -53,7 +58,10 @@ def _topk_log_softmax_kernel(
         ).to(tl.float32)
         block_max = tl.max(logits)
         new_max = tl.maximum(max_val, block_max)
-        se = se * tl.exp(max_val - new_max) + tl.sum(tl.exp(logits - new_max))
+        normalizer = tl.where(new_max == float("-inf"), 0.0, new_max)
+        se = se * tl.exp(max_val - normalizer) + tl.sum(
+            tl.exp(logits - normalizer)
+        )
         max_val = new_max
 
     lse = tl.log(se)

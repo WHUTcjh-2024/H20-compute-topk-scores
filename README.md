@@ -9,6 +9,10 @@ Target GPU: NVIDIA H20.
 
 ## 结果
 
+以下 H20 正确性与性能数据记录于 `42ef89b`。本分支的 `-inf` 前缀修复已通过
+Triton CPU 解释模式验证，尚未在 H20 上复测；无卡回归命令：
+`python -m pytest -q tests/test_log_softmax_cpu.py`。
+
 - Correctness：quick 57/57，full 129/129。
 - Benchmark：72 个 case，串行测量，CUDA events，warmup=20，repeats=500，取 median。
 - `ratio = reference latency / candidate latency`：

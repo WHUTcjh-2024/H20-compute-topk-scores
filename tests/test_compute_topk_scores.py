@@ -178,6 +178,25 @@ def test_compute_topk_scores_ties(num_logprobs):
 
 
 @pytest.mark.compute_topk_scores
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_compute_topk_scores_all_masked_prefix(dtype):
+    # The first 1024 logits are -inf, including when the only finite values
+    # live in the tail after two complete scan blocks.
+    vocab = 2064
+    logits = torch.full((2, vocab), float("-inf"), dtype=dtype, device=device)
+    logits[0, 1024:] = torch.linspace(-2, 2, vocab - 1024, device=device)
+    logits[1, 2048:] = torch.arange(16, device=device, dtype=torch.float32)
+    sampled = torch.tensor([1024, 2050], dtype=torch.int64, device=device)
+
+    ref = _vllm_fn(logits, 5, sampled)
+    out = compute_topk_scores(logits, 5, sampled)
+
+    assert torch.isfinite(ref.logprobs).all()
+    assert torch.isfinite(out.logprobs).all()
+    _assert_matches(ref, out, logits, sampled, 5, strict_ids=False)
+
+
+@pytest.mark.compute_topk_scores
 @pytest.mark.parametrize("num_logprobs,max_custom", [(5, 3), (4, 4), (0, 1)])
 def test_compute_topk_scores_custom_token_ids(num_logprobs, max_custom):
     from vllm.sampling_params import SamplingParams
