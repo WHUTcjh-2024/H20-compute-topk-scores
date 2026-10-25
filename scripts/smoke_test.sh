@@ -10,11 +10,12 @@ export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 PYTHON="${PYTHON:-}"
 if [ -z "$PYTHON" ]; then
   for candidate in \
-    /root/autodl-tmp/venv-vllm029b/bin/python \
+    "${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python}" \
     "$ROOT/.venv/bin/python" \
     "$ROOT/venv/bin/python" \
     python3; do
-    if command -v "$candidate" >/dev/null 2>&1; then
+    [ -n "$candidate" ] || continue
+    if [ -x "$candidate" ] || command -v "$candidate" >/dev/null 2>&1; then
       PYTHON="$candidate"
       break
     fi
