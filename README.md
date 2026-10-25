@@ -57,7 +57,6 @@ K     = {1, 10, 50}
 | SpeedUp mean | 1.148 |
 | SpeedUp p90 | 1.272 |
 | SpeedUp max | **1.297** |
-| SpeedUp < 0.9 | **0 / 72** |
 | SpeedUp < 1.0 | 7 / 72 |
 | SpeedUp >= 1.0 | **65 / 72** |
 
@@ -86,7 +85,7 @@ bf16, B=1, V=151936, K=1
 SpeedUp = 1.297
 ```
 
-7 个低于 1.0 的 case 全部位于 `V=32768`，最差约慢 1.8%；没有 case 低于本项目采用的 0.9 性能门槛。
+7 个低于 1.0 的 case 全部位于 `V=32768`，最差约慢 1.8%；其余 65 个 case 不慢于 reference。
 
 ## 优化范围
 
@@ -244,8 +243,6 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 python scripts/check_env.py
 bash scripts/smoke_test.sh
 ```
-
-`requirements/freeze.txt` 是完整环境审计快照，包含机器本地路径，不用于直接安装。
 
 ## 目录
 
