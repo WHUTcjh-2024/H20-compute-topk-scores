@@ -1,0 +1,30 @@
+====================================================================
+H20 experiment environment check
+====================================================================
+[system]
+hostname                    : autodl-container-26d148a435-bca2afe3
+os                          : Ubuntu 22.04.5 LTS
+kernel                      : 5.15.0-130-generic
+python                      : 3.12.15
+python executable           : /root/autodl-tmp/H20-compute-topk-scores/.venv/bin/python
+python prefix               : /root/autodl-tmp/H20-compute-topk-scores/.venv
+git branch                  : main
+git commit                  : d6c980c87c27a6bd62492194e42c6a6cfd923e1a
+git dirty files             : 0
+[cuda]
+cuda available              : True
+gpu model                   : NVIDIA H20
+compute capability          : 9.0
+nvidia driver               : 580.65.06
+cuda driver version         : 13.0
+torch.version.cuda          : 13.0
+pip cuda-toolkit            : 13.0.3.0
+cuda toolkit                : /usr/local/cuda (nvcc 13.0)
+nvidia-smi                  : /usr/bin/nvidia-smi
+nvidia-smi file             : /usr/bin/nvidia-smi (1218080 bytes, executable=True)
+[packages]
+torch                       : 2.13.0+cu130 (/root/autodl-tmp/H20-compute-topk-scores/.venv/lib/python3.12/site-packages/torch/__init__.py)
+triton                      : 3.7.1 (/root/autodl-tmp/H20-compute-topk-scores/.venv/lib/python3.12/site-packages/triton/__init__.py)
+vllm                        : 0.29.0 (/root/autodl-tmp/H20-compute-topk-scores/.venv/lib/python3.12/site-packages/vllm/__init__.py)
+pytest                      : 9.1.1 (/root/autodl-tmp/H20-compute-topk-scores/.venv/lib/python3.12/site-packages/pytest/__init__.py)
+h20_topk                    : 0.1.0 (/root/autodl-tmp/H20-compute-topk-scores/src/h20_topk/__init__.py)

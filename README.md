@@ -9,9 +9,13 @@ Target GPU: NVIDIA H20.
 
 ## 结果
 
-以下 H20 正确性与性能数据记录于 `42ef89b`。本分支的 `-inf` 前缀修复已通过
-Triton CPU 解释模式验证，尚未在 H20 上复测；无卡回归命令：
-`python -m pytest -q tests/test_log_softmax_cpu.py`。
+**当前提交 `d6c980c` 的新宿主机 H20 复测已完成（2026-10-26）：** CPU 1/1、
+GPU quick 60/60、full 132/132；72 个 case 的 `reference/candidate` 比值最小
+0.982、中位 1.163，65 个 case ≥ 1.0。环境、验收结论、边界和逐 case 原始数据见
+[复测报告](benchmark/retest-2026-10-26/report.md)。
+
+以下是 `42ef89b` 在旧宿主机上的历史记录，保留供追溯；驱动、Python 补丁版本
+及提交与本次不同，绝对时延不可直接跨环境比较。
 
 - Correctness：quick 57/57，full 129/129。
 - Benchmark：72 个 case，串行测量，CUDA events，warmup=20，repeats=500，取 median。
@@ -93,8 +97,9 @@ QUICK_MODE=1 pytest -q tests/test_compute_topk_scores.py -m compute_topk_scores
 pytest -q tests/test_compute_topk_scores.py -m compute_topk_scores
 ```
 
-- quick：57 passed
-- full：129 passed
+- 当前提交 quick：60 passed
+- 当前提交 full：132 passed
+- 当前提交 CPU `-inf` 回归：1 passed
 
 覆盖 fp16 / bf16 / float32、不同 B/V/K、non-contiguous、ties、custom token ids、
 logits_mode、empty batch、cu_num_logits。
@@ -120,7 +125,7 @@ python scripts/compare_bench.py \
   --candidate artifacts/new-h20/candidate.json
 ```
 
-## 环境
+## 历史测量环境（`42ef89b`）
 
 | 项目 | 值 |
 | --- | --- |

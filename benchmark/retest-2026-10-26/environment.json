@@ -1,0 +1,70 @@
+{
+  "hostname": "autodl-container-26d148a435-bca2afe3",
+  "os": "Ubuntu 22.04.5 LTS",
+  "kernel": "5.15.0-130-generic",
+  "python": "3.12.15",
+  "python_executable": "/root/autodl-tmp/H20-compute-topk-scores/.venv/bin/python",
+  "python_prefix": "/root/autodl-tmp/H20-compute-topk-scores/.venv",
+  "git": {
+    "commit": "d6c980c87c27a6bd62492194e42c6a6cfd923e1a",
+    "branch": "main",
+    "dirty_files": 0
+  },
+  "nvidia_smi": {
+    "path": "/usr/bin/nvidia-smi",
+    "usable": true,
+    "driver": "580.65.06",
+    "cuda_version": "13.0",
+    "file": "/usr/bin/nvidia-smi (1218080 bytes, executable=True)"
+  },
+  "nvidia_driver": "580.65.06",
+  "cuda_driver_version": "13.0",
+  "gpu_model": "NVIDIA H20",
+  "compute_capability": "9.0",
+  "cuda_available": true,
+  "device_count": 1,
+  "cuda_toolkits": [
+    {
+      "path": "/usr/local/cuda",
+      "real_path": "/usr/local/cuda-13.0",
+      "nvcc": "13.0"
+    }
+  ],
+  "cuda_toolkit_pip": "13.0.3.0",
+  "packages": {
+    "torch": {
+      "ok": true,
+      "version": "2.13.0+cu130",
+      "path": "/root/autodl-tmp/H20-compute-topk-scores/.venv/lib/python3.12/site-packages/torch/__init__.py",
+      "dist_version": "2.13.0",
+      "cuda_version": "13.0",
+      "cuda_available": true,
+      "device_count": 1,
+      "device_name": "NVIDIA H20"
+    },
+    "triton": {
+      "ok": true,
+      "version": "3.7.1",
+      "path": "/root/autodl-tmp/H20-compute-topk-scores/.venv/lib/python3.12/site-packages/triton/__init__.py",
+      "dist_version": "3.7.1"
+    },
+    "vllm": {
+      "ok": true,
+      "version": "0.29.0",
+      "path": "/root/autodl-tmp/H20-compute-topk-scores/.venv/lib/python3.12/site-packages/vllm/__init__.py",
+      "dist_version": "0.29.0"
+    },
+    "pytest": {
+      "ok": true,
+      "version": "9.1.1",
+      "path": "/root/autodl-tmp/H20-compute-topk-scores/.venv/lib/python3.12/site-packages/pytest/__init__.py",
+      "dist_version": "9.1.1"
+    },
+    "h20_topk": {
+      "ok": true,
+      "version": "0.1.0",
+      "path": "/root/autodl-tmp/H20-compute-topk-scores/src/h20_topk/__init__.py",
+      "dist_version": null
+    }
+  }
+}
