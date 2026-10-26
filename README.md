@@ -147,56 +147,6 @@ single scan
 
 该 kernel 在实验中表现为 launch-bound / non-bottleneck，因此不继续投入复杂优化。
 
-## Correctness 命令
-
-```bash
-python -m pytest -q tests/test_log_softmax_cpu.py
-
-QUICK_MODE=1 python -m pytest -q \
-  tests/test_compute_topk_scores.py -m compute_topk_scores
-
-python -m pytest -q \
-  tests/test_compute_topk_scores.py -m compute_topk_scores
-```
-
-## Benchmark 命令
-
-Reference：
-
-```bash
-python scripts/bench_matrix.py --target vllm \
-  --batches 1,8,64,256 \
-  --vocabs 32768,131072,151936 \
-  --ks 1,10,50 \
-  --dtypes bfloat16,float16 \
-  --warmup 20 \
-  --repeats 500 \
-  --output artifacts/retest/vllm.json
-```
-
-Candidate：
-
-```bash
-python scripts/bench_matrix.py --target candidate \
-  --op src/h20_topk/ops/compute_topk_scores.py \
-  --batches 1,8,64,256 \
-  --vocabs 32768,131072,151936 \
-  --ks 1,10,50 \
-  --dtypes bfloat16,float16 \
-  --warmup 20 \
-  --repeats 500 \
-  --output artifacts/retest/candidate.json
-```
-
-Compare：
-
-```bash
-python scripts/compare_bench.py \
-  --reference artifacts/retest/vllm.json \
-  --candidate artifacts/retest/candidate.json \
-  --output artifacts/retest/comparison.json
-```
-
 ## 复测环境
 
 | 项目 | 值 |
