@@ -1,17 +1,11 @@
-# compute_topk_scores — NVIDIA H20 算子优化工程
+# compute_topk_scores — NVIDIA H20 算子优化
 
 针对 vLLM 0.29.0 `compute_topk_scores` 路径的 NVIDIA H20 Triton kernel 优化。
 
 - Reference：`vllm==0.29.0`，`vllm/v1/worker/gpu/sample/logprob.py`
 - Candidate：`src/h20_topk/ops/compute_topk_scores.py`
 - Target GPU：NVIDIA H20
-- 复测代码提交：`d6c980c87c27a6bd62492194e42c6a6cfd923e1a`
-- 复测日期：2026-10-26
-
-## 当前结果
-
-本次 H20 复测已完成，correctness 和 performance 均达到本项目验收范围。
-
+  
 ### Correctness
 
 | 测试 | 结果 |
@@ -218,28 +212,3 @@ python scripts/compare_bench.py \
 | Triton | 3.7.1 |
 | vLLM | 0.29.0 |
 | pytest | 9.1.1 |
-| 测试提交 | `d6c980c87c27a6bd62492194e42c6a6cfd923e1a` |
-
-环境检查：
-
-```bash
-python scripts/check_env.py --strict --require-gpu
-python -m pip check
-```
-
-## 复现
-
-```bash
-git clone https://github.com/WHUTcjh-2024/H20-compute-topk-scores.git
-cd H20-compute-topk-scores
-
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip==26.2.2
-python -m pip install -r requirements/core.txt
-
-export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
-
-python scripts/check_env.py
-bash scripts/smoke_test.sh
-```
